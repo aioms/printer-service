@@ -67,39 +67,171 @@
  * - printSideBySideBarcodes: Image-based, side-by-side layout (PRECISE)
  */
 
+const { ThermalPrinter: PhygridThermalPrinter  } = require('@phygrid/thermal-printer')
+const { PeripheralInstance  } = require('@phygrid/hub-client')
 const { ThermalPrinter, PrinterTypes, CharacterSet, BreakLine } = require('node-thermal-printer');
-const logger = require('../config/logger');
 const bwipjs = require('bwip-js');
-const { createCanvas, loadImage } = require('canvas');
+const { createCanvas } = require('canvas');
 const fs = require('fs');
-const path = require('path');
+
+const logger = require('../config/logger'); 
+
+// giả sử bạn đã kết nối/prép peripheralInstance tương ứng với máy in
+async function printTwoBarcodes(peripheralInstance, barcode) {
+  const printer = new PhygridThermalPrinter(PeripheralInstance);
+
+  // Xoá buffer cũ
+  printer.clear();
+
+  // Thiết lập khoảng cách / lề nếu cần
+  // In barcode 1
+  printer.addBarcode(barcode, 'CODE128', {
+    width: 2,        // thử width module = 2 – bạn cần test và đo thực tế
+    height: 176      // ≈ 22mm nếu máy ~8 dots/mm → 22×8=176 dots
+  });
+
+  // Chuyển sang cột thứ 2 – nếu máy/printer hỗ trợ đặt con trỏ ngang
+  // Nếu không hỗ trợ, bạn có thể in 2 barcode liên tiếp theo chiều dọc
+  // Ở đây giả sử in song song: sử dụng thêm một khoảng ngang (ví dụ text rỗng)
+  printer.addText('     '); // khoảng trắng để đẩy sang phải (không phải giải pháp tối ưu)
+  printer.addBarcode(barcode, 'CODE128', {
+    width: 2,
+    height: 176
+  });
+
+  // Nếu không in song song mà in nối dưới nhau:
+  // printer.newLine();
+  // printer.addBarcode(barcode2, 'CODE128', { width:2, height:176 });
+
+  // Kết thúc và thực hiện in
+  await printer.print();
+  // nếu máy hỗ trợ: máy cut giấy
+  // (kiểm tra phương thức cut nếu thư viện hỗ trợ)
+}
+
+// Generate a barcode image
+async function generateBarcodeImage(text) {
+  try {
+    const png = await bwipjs.toBuffer({
+      bcid: 'code128',
+      text,
+      scale: 2,
+      height: 10,
+      includetext: false,
+      textxalign: 'center',
+    });
+    return png;
+  } catch (err) {
+    console.error('Error generating barcode:', err);
+    throw err;
+  }
+}
+
+// Combine two barcodes side by side
+async function createSideBySideBarcodes(code1, code2, outputPath) {
+  try {
+    // Generate both barcodes
+    const barcode1 = await generateBarcodeImage(code1, 'temp1.png');
+    const barcode2 = await generateBarcodeImage(code2, 'temp2.png');
+
+    // Load barcodes as images
+    const { loadImage } = require('canvas');
+    const img1 = await loadImage(barcode1);
+    const img2 = await loadImage(barcode2);
+
+    // Create canvas with width for both barcodes
+    const canvas = createCanvas(img1.width + img2.width + 100, Math.max(img1.height, img2.height));
+    const ctx = canvas.getContext('2d');
+
+    // Fill white background
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Draw both barcodes
+    ctx.drawImage(img1, 10, 0);
+    ctx.drawImage(img2, img1.width + 100, 0);
+
+    // Save combined image
+    const buffer = canvas.toBuffer('image/png');
+    fs.writeFileSync(outputPath, buffer);
+    console.log(`Combined barcode image saved to ${outputPath}`);
+
+    return outputPath;
+  } catch (err) {
+    console.error('Error combining barcodes:', err);
+    throw err;
+  }
+}
+
+// One barcode
+async function createSingleBarcode(code, outputPath) {
+  try {
+    // Generate barcode image
+    const barcode = await generateBarcodeImage(code, 'temp.png');
+
+    // Load barcode as image
+    const { loadImage } = require('canvas');
+    const img = await loadImage(barcode);
+
+    // Create canvas with width for barcode
+    const canvas = createCanvas(img.width + 100, img.height);
+    const ctx = canvas.getContext('2d');
+
+    // Fill white background
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Draw barcode
+    ctx.drawImage(img, 20, 0);
+
+    // Save combined image
+    const buffer = canvas.toBuffer('image/png');
+    fs.writeFileSync(outputPath, buffer);
+    console.log(`Single barcode image saved to ${outputPath}`);
+
+    return outputPath;
+  } catch (err) {
+    console.error('Error creating single barcode:', err);
+    throw err;
+  }
+}
 
 class PrinterService {
   constructor(config = {}) {
     this.config = {
-      ipAddress: config.ipAddress || process.env.DEFAULT_PRINTER_IP || '192.168.1.220',
+      ipAddress: config.ipAddress || process.env.DEFAULT_PRINTER_IP || '192.168.0.220',
       port: config.port || parseInt(process.env.DEFAULT_PRINTER_PORT) || 9100,
       timeout: config.timeout || parseInt(process.env.PRINTER_TIMEOUT) || 5000,
       ...config
     };
-
-    // XPrinter XP-365B specifications
-    // Resolution: 203 DPI
-    // Paper width: 76mm (typical for 80mm thermal paper with margins)
-    // 76mm × 203 DPI / 25.4mm = ~607 dots width
-    // Character width: 48 characters per line (standard for 80mm paper)
-    this.PRINTER_SPECS = {
-      DPI: 203,
-      PAPER_WIDTH_MM: 76,
-      PAPER_WIDTH_DOTS: 607,
-      CHARS_PER_LINE: 48,
-      LABEL_WIDTH_MM: 35,
-      LABEL_HEIGHT_MM: 22,
-      MARGIN_MM: 3
-    };
+    console.log({ config: this.config })
 
     this.printer = null;
     this.isConnected = false;
+    // Cấu hình cho giấy 74x24mm
+    this.paperWidth = 74;  // mm
+    this.paperHeight = 24; // mm
+    this.printerDPI = 203; // dots per inch
+    
+    // Tính toán chiều cao barcode (mm sang dots)
+    // Với 2 barcodes trên 24mm, mỗi cái khoảng 10mm
+    this.barcodeHeight = this.mmToDots(10);
+  }
+
+  // Chuyển đổi mm sang dots
+  mmToDots(mm) {
+    return Math.round((mm * this.printerDPI) / 25.4);
+  }
+
+  // Lấy thông tin cấu hình hiện tại
+  getConfig() {
+    return {
+      paperWidth: this.paperWidth,
+      paperHeight: this.paperHeight,
+      printerDPI: this.printerDPI,
+      barcodeHeight: this.barcodeHeight,
+      barcodeHeightMM: Math.round((this.barcodeHeight * 25.4) / this.printerDPI)
+    };
   }
 
   /**
@@ -110,11 +242,11 @@ class PrinterService {
       this.printer = new ThermalPrinter({
         type: PrinterTypes.EPSON,
         interface: `tcp://${this.config.ipAddress}:${this.config.port}`,
-        characterSet: CharacterSet.PC437_USA,
+        characterSet: CharacterSet.PC852_LATIN2,
         removeSpecialCharacters: false,
-        lineCharacter: "=",
+        // lineCharacter: "=",
         breakLine: BreakLine.WORD,
-        width: this.PRINTER_SPECS.CHARS_PER_LINE, // 48 characters per line for 76-80mm paper
+        // width: 80,
         options: {
           timeout: this.config.timeout,
         }
@@ -169,11 +301,8 @@ class PrinterService {
   }
 
   /**
-   * Print barcode labels optimized for XPrinter XP-365B
-   * Paper: 76mm thermal paper (203 DPI)
-   * Label dimensions: 35mm × 22mm
-   * @param {Object} productData - Product information {productCode, productName}
-   * @param {number} quantity - Number of labels to print
+   * Print barcode labels with 35mm x 22mm dimensions
+   * Printable area: 76mm x 24mm (approximately 288 x 91 dots at 203 DPI)
    */
   async printBarcodeLabel(productData, quantity = 1) {
     try {
@@ -199,36 +328,35 @@ class PrinterService {
 
       logger.info(`Printing ${quantity} barcode labels for product: ${productCode}`);
 
+      // Clear any previous content
       this.printer.clear();
 
-      // Sanitize and truncate product name
-      const sanitizedName = this.sanitizeText(productName || '');
-      const charsPerLine = 32; // ~32 chars for full width label at Font B
-      const truncatedName = sanitizedName.length > charsPerLine
-        ? sanitizedName.substring(0, charsPerLine - 3) + '...'
-        : sanitizedName;
-
       for (let i = 0; i < quantity; i++) {
-        // Product name (if provided)
-        if (truncatedName) {
+        // Set paper size for 35mm x 22mm labels (approximately 132 x 83 dots at 203 DPI)
+        // Using smaller margins to fit the 35mm width
+
+        // Product name (if provided) - truncated to fit 35mm width
+        if (productName) {
           this.printer.alignCenter();
-          this.printer.setTypeFontB(); // Smaller font for product name
+          // Use smaller font and truncate long names
+          const truncatedName = productName.length > 16 ? productName.substring(0, 16) + '...' : productName;
+          this.printer.setTextSize(0, 0); // Small font
           this.printer.println(truncatedName);
           this.printer.newLine();
         }
 
-        // Barcode - centered
-        // For 35mm width label: ~280 dots at 203 DPI
-        // Using CODE128 with optimal sizing
+        // Barcode - positioned in center
         this.printer.alignCenter();
+
+        // Print barcode with optimal size for 35mm width
+        // Using CODE128 format with appropriate width and height
         this.printer.code128(productCode, {
-          width: "MEDIUM",   // Medium width for single label (width=3 dots)
-          height: 60,        // ~7.5mm height (60 dots / 203 DPI * 25.4mm)
-          text: 2            // Text below barcode
+          width: 'SMALL',    // Smaller width to fit 35mm
+          height: 40,        // Reduced height to fit 22mm with text
+          text: 1            // Show text below barcode
         });
 
-        // Spacing before cut
-        this.printer.newLine();
+        // Add some spacing
         this.printer.newLine();
 
         // Cut paper after each label (if supported)
@@ -242,6 +370,7 @@ class PrinterService {
 
       // Execute print job
       const result = await this.printer.execute();
+      console.log({ result })
 
       if (result) {
         logger.info(`Successfully printed ${quantity} barcode labels`);
@@ -250,7 +379,7 @@ class PrinterService {
           message: `Successfully printed ${quantity} barcode label(s)`,
           data: {
             productCode,
-            productName: truncatedName,
+            productName,
             quantity,
             timestamp: new Date().toISOString()
           }
@@ -268,306 +397,38 @@ class PrinterService {
     }
   }
 
-  /**
-   * Sanitize text for thermal printer compatibility
-   * Preserves Vietnamese accented characters by keeping them in composed form
-   * @param {string} text - Text to sanitize
-   * @returns {string} - Sanitized text safe for thermal printing
-   */
-  sanitizeText(text) {
-    if (!text) return '';
-    // Keep Vietnamese characters intact, only remove truly incompatible characters
-    // Vietnamese Unicode ranges:
-    // - Basic Latin: \u0020-\u007E (space to ~)
-    // - Latin-1 Supplement: \u00C0-\u00FF (À-ÿ)
-    // - Vietnamese specific: \u0102-\u0103 (Ă ă), \u0110-\u0111 (Đ đ)
-    // - Latin Extended Additional: \u01A0-\u01B0 (Ơ ơ Ư ư)
-    // - Combining diacritics: \u0300-\u0323 (tone marks)
-    return text
-      .replace(/[^\u0020-\u007E\u00C0-\u00FF\u0102-\u0103\u0110-\u0111\u01A0-\u01B0\u0300-\u0323]/g, '')
-      .trim();
-  }
+  // Helper function to sanitize text for ASCII/Unicode compatibility
+  // Preserves Vietnamese accented characters
+  // sanitizeText(text){
+  //   if (!text) return '';
+  //   // Only accept Vietnamese characters and basic ASCII
+  //   // Exclude other languages like Chinese, Japanese, Korean, etc.
+  //   // Vietnamese Unicode ranges:
+  //   // - Basic Latin: \u0020-\u007E (space to ~)
+  //   // - Latin-1 Supplement: \u00C0-\u00FF (À-ÿ)
+  //   // - Vietnamese specific: \u0102-\u0103 (Ă ă), \u0110-\u0111 (Đ đ)
+  //   // - Latin Extended Additional: \u01A0-\u01B0 (Ơ ơ Ư ư)
+  //   // - Combining diacritics: \u0300-\u0323 (tone marks)
+  //   return text
+  //     .normalize('NFD') // Decompose unicode characters
+  //     .replace(/[^\u0020-\u007E\u00C0-\u00FF\u0102-\u0103\u0110-\u0111\u01A0-\u01B0\u0300-\u0323]/g, '')
+  //     .trim();
+  // };
 
-  /**
-   * Sanitize text to ASCII-only (fallback for maximum compatibility)
-   * @param {string} text - Text to sanitize
-   * @returns {string} - ASCII-only text
-   */
-  sanitizeTextASCII(text) {
+  sanitizeTextStandard(text){
     if (!text) return '';
+    // Convert to ASCII-safe characters, replace non-ASCII with safe alternatives
     return text
       .normalize('NFD') // Decompose unicode characters
       .replace(/[\u0300-\u036f]/g, '') // Remove diacritics
       .replace(/[^\x20-\x7E]/g, '?') // Replace non-ASCII with ?
       .trim();
-  }
+  };
 
   /**
-   * Generate a single barcode image buffer
-   * @private
-   * @param {string} text - Barcode text
-   * @param {Object} options - Barcode generation options
-   * @returns {Promise<Buffer>} PNG buffer
-   */
-  async _generateBarcodeImage(text, options = {}) {
-    try {
-      const png = await bwipjs.toBuffer({
-        bcid: 'code128',
-        text,
-        scale: options.scale || 2,
-        height: options.height || 10,
-        includetext: options.includetext || false,
-        textxalign: 'center',
-      });
-      return png;
-    } catch (err) {
-      logger.error('Error generating barcode image:', err);
-      throw err;
-    }
-  }
-
-  /**
-   * Create side-by-side barcode image for dual label printing
-   * @private
-   * @param {string} code1 - First barcode text
-   * @param {string} code2 - Second barcode text
-   * @returns {Promise<Buffer>} Combined PNG buffer
-   */
-  async _createSideBySideBarcodes(code1, code2) {
-    try {
-      // Generate both barcodes
-      const barcode1 = await this._generateBarcodeImage(code1);
-      const barcode2 = await this._generateBarcodeImage(code2);
-
-      // Load barcodes as images
-      const img1 = await loadImage(barcode1);
-      const img2 = await loadImage(barcode2);
-
-      // Create canvas with width for both barcodes
-      // Spacing: 20px left margin + img1 + 60px gap + img2 + 20px right margin
-      const canvas = createCanvas(
-        img1.width + img2.width + 100,
-        Math.max(img1.height, img2.height)
-      );
-      const ctx = canvas.getContext('2d');
-
-      // Fill white background
-      ctx.fillStyle = 'white';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-      // Draw both barcodes
-      ctx.drawImage(img1, 20, 0);
-      ctx.drawImage(img2, img1.width + 80, 0);
-
-      // Return buffer instead of writing to file
-      return canvas.toBuffer('image/png');
-    } catch (err) {
-      logger.error('Error combining barcodes:', err);
-      throw err;
-    }
-  }
-
-  /**
-   * Create single barcode image
-   * @private
-   * @param {string} code - Barcode text
-   * @returns {Promise<Buffer>} PNG buffer
-   */
-  async _createSingleBarcode(code) {
-    try {
-      // Generate barcode image
-      const barcode = await this._generateBarcodeImage(code);
-
-      // Load barcode as image
-      const img = await loadImage(barcode);
-
-      // Create canvas with padding
-      const canvas = createCanvas(img.width + 40, img.height);
-      const ctx = canvas.getContext('2d');
-
-      // Fill white background
-      ctx.fillStyle = 'white';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-      // Draw barcode
-      ctx.drawImage(img, 20, 0);
-
-      // Return buffer
-      return canvas.toBuffer('image/png');
-    } catch (err) {
-      logger.error('Error creating single barcode:', err);
-      throw err;
-    }
-  }
-
-  /**
-   * Print side-by-side barcode labels using image-based approach
-   * Prints two barcodes per row on 76mm thermal paper (35mm width each label)
-   * Paper specs: 76mm width × 203 DPI = ~607 dots, 48 chars/line
-   * Label specs: 35mm × 22mm per label
-   *
-   * This method uses image generation for true side-by-side printing.
-   * More resource-intensive but provides precise layout control.
-   *
-   * @param {Object} productData - Product information {productCode, productName}
-   * @param {number} quantity - Number of labels to print
-   * @returns {Promise<Object>} Print result
-   */
-  async printSideBySideBarcodes(productData, quantity = 1) {
-    try {
-      if (!this.printer) {
-        const initResult = await this.initialize();
-        if (!initResult.success) {
-          throw new Error(`Printer initialization failed: ${initResult.message}`);
-        }
-      }
-
-      if (!this.isConnected) {
-        const testResult = await this.testConnection();
-        if (!testResult.isConnected) {
-          throw new Error(`Printer not connected: ${testResult.errorMessage}`);
-        }
-      }
-
-      const { productCode, productName } = productData;
-
-      if (!productCode) {
-        throw new Error('Product code is required for barcode printing');
-      }
-
-      logger.info(`Printing ${quantity} side-by-side barcode labels for product: ${productCode}`);
-
-      // Calculate rows needed (2 barcodes per row)
-      const rows = Math.ceil(quantity / 2);
-
-      // Sanitize product name for thermal printer
-      const sanitizedName = this.sanitizeText(productName || '');
-
-      // Calculate text width for each label (22 chars per 35mm label)
-      // 48 chars total / 2 labels = 24 chars per label, minus spacing = ~22 chars
-      const charsPerLabel = 22;
-      const truncatedName = sanitizedName.length > charsPerLabel
-        ? sanitizedName.substring(0, charsPerLabel - 3) + '...'
-        : sanitizedName;
-
-      this.printer.clear();
-
-      // Create temporary directory for images if it doesn't exist
-      const tempDir = path.join(__dirname, '../temp');
-      if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true });
-      }
-
-      for (let row = 0; row < rows; row++) {
-        const startIndex = row * 2;
-        const barcodesInRow = Math.min(2, quantity - startIndex);
-
-        this.printer.setTypeFontB();
-
-        if (barcodesInRow === 2) {
-          // Two labels side by side
-          // Product names header
-          this.printer.tableCustom([
-            { text: truncatedName, align: "CENTER", width: 0.48 },
-            { text: '', align: "CENTER", width: 0.04 }, // Spacing
-            { text: truncatedName, align: "CENTER", width: 0.48 }
-          ]);
-
-          // Generate combined barcode image
-          const barcodeImageBuffer = await this._createSideBySideBarcodes(productCode, productCode);
-          const tempImagePath = path.join(tempDir, `barcode_${Date.now()}_${row}.png`);
-          fs.writeFileSync(tempImagePath, barcodeImageBuffer);
-
-          // Print barcode image
-          await this.printer.printImage(tempImagePath);
-
-          // Clean up temp file
-          fs.unlinkSync(tempImagePath);
-
-          // Product codes below barcodes
-          this.printer.tableCustom([
-            { text: productCode, align: "CENTER", width: 0.48 },
-            { text: '', align: "CENTER", width: 0.04 },
-            { text: productCode, align: "CENTER", width: 0.48 }
-          ]);
-
-        } else {
-          // Single label (odd quantity last item)
-          this.printer.tableCustom([
-            { text: truncatedName, align: "CENTER", width: 0.48 }
-          ]);
-
-          // Generate single barcode image
-          const barcodeImageBuffer = await this._createSingleBarcode(productCode);
-          const tempImagePath = path.join(tempDir, `barcode_${Date.now()}_${row}.png`);
-          fs.writeFileSync(tempImagePath, barcodeImageBuffer);
-
-          // Print barcode image
-          this.printer.alignLeft();
-          await this.printer.printImage(tempImagePath);
-
-          // Clean up temp file
-          fs.unlinkSync(tempImagePath);
-
-          // Product code
-          this.printer.tableCustom([
-            { text: productCode, align: "CENTER", width: 0.48 }
-          ]);
-        }
-
-        // Spacing between rows
-        this.printer.newLine();
-        this.printer.newLine();
-
-        // Add extra spacing between rows if not the last row
-        if (row < rows - 1) {
-          this.printer.newLine();
-        }
-      }
-
-      // Final cut
-      this.printer.cut();
-
-      // Execute print job
-      const result = await this.printer.execute();
-
-      if (!result) {
-        throw new Error('Print execution failed');
-      }
-
-      logger.info(`Successfully printed ${quantity} side-by-side barcode labels in ${rows} rows`);
-      return {
-        success: true,
-        message: `Successfully printed ${quantity} side-by-side barcode label(s) in ${rows} row(s)`,
-        data: {
-          productCode,
-          productName: truncatedName,
-          quantity,
-          rows,
-          method: 'image-based',
-          timestamp: new Date().toISOString()
-        }
-      };
-    } catch (error) {
-      logger.error('Side-by-side barcode printing failed:', error);
-      return {
-        success: false,
-        message: `Printing failed: ${error.message}`,
-        data: null
-      };
-    }
-  }
-
-  /**
-   * Print horizontal barcode layout (optimized for XPrinter XP-365B)
-   * Prints labels vertically (stacked) on 76mm thermal paper
-   * Paper specs: 76mm width × 203 DPI = ~607 dots, 48 chars/line
-   * Label specs: 35mm × 22mm per label
-   *
-   * This method uses native CODE128 commands for reliability and speed.
-   * Labels are printed one per row with separator lines.
-   *
-   * For true side-by-side printing, use printSideBySideBarcodes() instead.
+   * Print horizontal barcode layout (alternative layout)
+   * Prints two barcodes per row on 76x24mm paper (35x20mm each barcode stamp)
+   * Format: Product name above barcode, product code below barcode, everything centered
    */
   async printHorizontalBarcodes(productData, quantity = 1) {
     try {
@@ -591,75 +452,172 @@ class PrinterService {
         throw new Error('Product code is required for barcode printing');
       }
 
-      logger.info(`Printing ${quantity} barcode labels for product: ${productCode}`);
+      logger.info(`Printing ${quantity} horizontal barcode labels (35x20mm each) for product: ${productCode}`);
 
-      // Sanitize product name for thermal printer
-      const sanitizedName = this.sanitizeText(productName || '');
+      // this.printer.clear();
+      // return this.testPrintBarcode(productCode, productName, quantity);
 
-      // For full-width labels: ~32 characters
-      const charsPerLabel = 32;
-      const truncatedName = sanitizedName.length > charsPerLabel
-        ? sanitizedName.substring(0, charsPerLabel - 3) + '...'
-        : sanitizedName;
+      // Calculate rows needed (2 barcodes per row)
+      const rows = Math.ceil(quantity / 2);
+      console.log({ rows, quantity });
 
-      this.printer.clear();
+      // Create combined barcode image
+      const combinedPath = './assets/combined.png'
+      const singleBarcodePath = './assets/single.png'
 
-      // Print each label individually (more reliable than side-by-side)
-      for (let i = 0; i < quantity; i++) {
-        // Product name
-        this.printer.setTypeFontB();
-        this.printer.alignCenter();
-        this.printer.println(truncatedName);
-        this.printer.newLine();
+      await createSideBySideBarcodes(productCode, productCode, combinedPath);
 
-        // Barcode - centered
-        this.printer.alignCenter();
-        this.printer.code128(productCode, {
-          width: "MEDIUM",    // Medium width for better readability (3 dots)
-          height: 60,          // ~7.6mm height (60 dots / 203 DPI * 25.4mm)
-          text: 2              // Text below barcode
-        });
+      if (quantity % 2 !== 0) {
+        await createSingleBarcode(productCode, singleBarcodePath);
+      }
 
-        // Spacing between labels
-        this.printer.newLine();
-        this.printer.newLine();
+      const sanitizedName = this.sanitizeTextStandard(productName);
+      const name = sanitizedName.length > 50 ? sanitizedName.substring(0, 48) + '...' : sanitizedName;
+      const isOneRowName = name.length <= 27;
 
-        // Add dashed line separator between labels (except last one)
-        if (i < quantity - 1) {
-          this.printer.drawLine();
-          this.printer.newLine();
+      const getSize = () => {
+        return {
+          width: this.printer.getWidth(),
+          config: this.printer.config
         }
       }
 
-      // Final cut
-      this.printer.cut();
+      for (let row = 0; row < rows; row++) {
+        // printTwoBarcodes(productCode)
+        const startIndex = row * 2;
+        const barcodesInRow = Math.min(2, quantity - startIndex);
+        
+        console.log({
+          startIndex,
+          barcodesInRow,
+          name_length: sanitizedName.length,
+          name,
+          isOneRowName
+        });
 
-      // Execute print job
-      const result = await this.printer.execute();
+        this.printer.setTypeFontB();
 
-      if (!result) {
-        throw new Error('Print execution failed');
+        this.printer.newLine();
+        this.printer.newLine();
+
+        if (barcodesInRow === 2) {
+
+          this.printer.tableCustom([
+            { text: name, align: "CENTER", width: 0.57 },
+            { text: '', align: "CENTER", width: 0.05 },
+            { text: name, align: "CENTER", width: 0.57 }
+          ]);
+
+          await this.printer.printImage(combinedPath);
+          // this.printer.newLine();
+
+          // this.printer.tableCustom([
+          //   { text: productCode, align: "CENTER", width: 0.64 },
+          //   { text: productCode, align: "CENTER", width: 0.64 }
+          // ]);
+
+        } else if (barcodesInRow === 1) {
+          this.printer.alignLeft();
+
+          this.printer.tableCustom([
+            { text: name, align: "CENTER", width: 0.6 },
+          ]);
+
+          await this.printer.printImage(singleBarcodePath);
+          // this.printer.newLine();
+
+          // this.printer.tableCustom([
+          //   { text: productCode, align: "CENTER", width: 0.64 },
+          // ]);
+        }
+
+        // Add spacing between rows
+        if (isOneRowName) {
+          this.printer.newLine();
+          this.printer.newLine();
+        } else {
+          this.printer.newLine();
+        }
+
       }
 
-      logger.info(`Successfully printed ${quantity} barcode labels`);
+      // Final cut
+      // this.printer.cut();
+      await this.printer.execute();
+
+      logger.info(`Successfully printed ${quantity} horizontal barcode labels in ${rows} rows`);
       return {
         success: true,
-        message: `Successfully printed ${quantity} barcode label(s)`,
+        message: `Successfully printed ${quantity} horizontal barcode label(s) in ${rows} row(s)`,
         data: {
           productCode,
-          productName: truncatedName,
+          productName: this.sanitizeTextStandard(productName),
           quantity,
+          rows,
           timestamp: new Date().toISOString()
         }
       };
     } catch (error) {
-      logger.error('Barcode printing failed:', error);
+      logger.error('Horizontal barcode printing failed:', error);
       return {
         success: false,
         message: `Printing failed: ${error.message}`,
         data: null
       };
     }
+  }
+
+  async testPrintBarcode(productCode, productName, quantity) {
+    // Create combined barcode image
+    const combinedPath = './assets/combined.png'
+    await createSideBySideBarcodes(productCode, productCode, combinedPath);
+
+    const sanitizedName = productName ? this.sanitizeText(productName) : '';
+
+    this.printer.setTypeFontB();
+
+    this.printer.tableCustom([
+      { text: sanitizedName, align: "CENTER", width: 0.64 },
+      // { text: '', align: "CENTER", width: 0.5 },
+      { text: sanitizedName, align: "CENTER", width: 0.64 }
+    ]);
+
+    await this.printer.printImage(combinedPath);
+    this.printer.newLine();
+
+    // this.printer.printBarcode(productCode, 73, {
+    //   width: 2,          // Minimum width (1 = narrowest bars)
+    //   height: 80,        // Reduced height for 20mm stamp
+    //   hriPos: 0,        // human-readable printed below (0 = none, 1 = below, 2 = above, etc.)
+    //   hriFont: 0        // font for human-readable (0 or 1)
+    // });
+
+    // this.printer.println(' ');
+    // Move to second position:
+    // this.printer.raw(escSetAbsolutePos(secondPosDots));
+
+    // this.printer.printBarcode(productCode, 73, {
+    //   width: 2,          // Minimum width (1 = narrowest bars)
+    //   height: 80,        // Reduced height for 20mm stamp
+    //   hriPos: 0,        // human-readable printed below (0 = none, 1 = below, 2 = above, etc.)
+    //   hriFont: 0        // font for human-readable (0 or 1)
+    // });
+
+    // await this.printer.printImage(combinedPath)
+
+    this.printer.tableCustom([
+      { text: productCode, align: "CENTER", width: 0.64 },
+      // { text: '', align: "CENTER", width: 0.5 },
+      { text: productCode, align: "CENTER", width: 0.64 }
+    ]);
+
+    this.printer.newLine();
+
+    // this.printer.cut();
+    const result = await this.printer.execute();
+    console.log({ result });
+
+    return { success: true, message: 'Test print successful' };
   }
 
   /**
