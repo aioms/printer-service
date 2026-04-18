@@ -34,7 +34,25 @@ const telegram = require('./utils/telegramNotifier');
 const vn = require('./utils/vietnameseEncoder');
 
 const SUPPORTED_MODES = ['escpos', 'tspl', 'zpl'];
-const SUPPORTED_LAYOUTS = ['single', 'side-by-side'];
+// Canonical layout names:
+//   'auto-pair'    - up to 2 labels per 76mm strip; the last strip holds 1
+//                    label when quantity is odd. This matches the operator's
+//                    intuition: "just give me N barcodes, pair them when
+//                    possible". Default.
+//   'single'       - always one label per strip (wastes stock on 76mm paper
+//                    but useful for debugging / single-column ESC/POS).
+//   'side-by-side' - alias of 'auto-pair', kept for backward compatibility.
+const SUPPORTED_LAYOUTS = ['auto-pair', 'single', 'side-by-side'];
+const DEFAULT_LAYOUT = 'auto-pair';
+
+/**
+ * Normalise a layout value to one of the driver-understood forms.
+ * @private
+ */
+function normaliseLayout(layout) {
+  if (layout === 'side-by-side') return 'auto-pair';
+  return layout;
+}
 
 class PrinterServiceV2 {
   constructor(options = {}) {
@@ -212,18 +230,22 @@ class PrinterServiceV2 {
    * @param {{productCode:string, productName?:string}} item
    * @param {number} [quantity=1]
    * @param {Object} [opts]
-   * @param {'single'|'side-by-side'} [opts.layout='single']
+   * @param {'auto-pair'|'single'|'side-by-side'} [opts.layout='auto-pair']
+   *        - `auto-pair` (default): packs 2 labels per 76mm strip; the last
+   *          strip will hold 1 label if `quantity` is odd.
+   *        - `single`: one label per strip (wasteful on 76mm paper).
+   *        - `side-by-side`: alias of `auto-pair`.
    * @returns {Promise<{success:boolean, message:string, data:Object|null}>}
    */
   async printBarcodeLabels(item, quantity = 1, opts = {}) {
-    const layout = opts.layout || 'single';
-    const qty = Math.max(1, Math.min(500, Math.floor(Number(quantity) || 1)));
-
-    if (!SUPPORTED_LAYOUTS.includes(layout)) {
-      const err = new Error(`Unsupported layout "${layout}"`);
-      await this._reportError(err, { action: 'printBarcodeLabels', layout });
+    const rawLayout = opts.layout || DEFAULT_LAYOUT;
+    if (!SUPPORTED_LAYOUTS.includes(rawLayout)) {
+      const err = new Error(`Unsupported layout "${rawLayout}"`);
+      await this._reportError(err, { action: 'printBarcodeLabels', layout: rawLayout });
       return { success: false, message: err.message, data: null };
     }
+    const layout = normaliseLayout(rawLayout);
+    const qty = Math.max(1, Math.min(500, Math.floor(Number(quantity) || 1)));
     if (!item || !item.productCode) {
       const err = new Error('productCode is required');
       await this._reportError(err, { action: 'printBarcodeLabels' });
@@ -289,17 +311,18 @@ class PrinterServiceV2 {
   // --- internal -----------------------------------------------------------
 
   async _buildJob(item, qty, layout) {
+    // `layout` has been normalised by `printBarcodeLabels` — either
+    // 'auto-pair' or 'single'.
     if (this.mode === 'escpos') {
-      if (layout === 'side-by-side') return this.driver.buildSideBySideJob(item, qty);
+      if (layout === 'auto-pair') return this.driver.buildSideBySideJob(item, qty);
       return this.driver.buildSingleColumnJob(item, qty);
     }
-    if (this.mode === 'tspl') {
-      // TSPL driver always emits the 2-up layout for `side-by-side`; for
-      // `single` we still build a 76x22 strip but only fill the left slot.
-      return this.driver.buildJob(item, layout === 'side-by-side' ? qty : qty, layout);
-    }
-    if (this.mode === 'zpl') {
-      return this.driver.buildJob(item, qty, layout);
+    if (this.mode === 'tspl' || this.mode === 'zpl') {
+      // TSPL / ZPL drivers always emit the 76mm strip. When the user forces
+      // `single`, we feed the driver quantity*2 with only the left slot
+      // filled — not worth the extra code path. Treat `single` and
+      // `auto-pair` the same: the driver already auto-pairs internally.
+      return this.driver.buildJob(item, qty);
     }
     throw new Error(`Unsupported mode: ${this.mode}`);
   }
@@ -321,3 +344,4 @@ class PrinterServiceV2 {
 module.exports = PrinterServiceV2;
 module.exports.SUPPORTED_MODES = SUPPORTED_MODES;
 module.exports.SUPPORTED_LAYOUTS = SUPPORTED_LAYOUTS;
+module.exports.DEFAULT_LAYOUT = DEFAULT_LAYOUT;

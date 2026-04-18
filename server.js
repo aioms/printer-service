@@ -93,10 +93,10 @@ const validatePrintRequest = (req, res, next) => {
   }
 
   // Layout is optional; if present must be a supported value (V2 only).
-  if (layout !== undefined && !['single', 'side-by-side'].includes(layout)) {
+  if (layout !== undefined && !['auto-pair', 'single', 'side-by-side'].includes(layout)) {
     return res.status(400).json({
       success: false,
-      message: 'Layout must be "single" or "side-by-side"'
+      message: 'Layout must be "auto-pair", "single", or "side-by-side"'
     });
   }
 
