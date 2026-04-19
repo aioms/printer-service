@@ -100,6 +100,18 @@ const validatePrintRequest = (req, res, next) => {
     });
   }
 
+  // price is optional; if present must be a finite, non-negative number (or numeric string).
+  const { price } = req.body;
+  if (price !== undefined && price !== null && price !== '') {
+    const n = Number(price);
+    if (!Number.isFinite(n) || n < 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Price must be a non-negative number',
+      });
+    }
+  }
+
   next();
 };
 
@@ -366,14 +378,15 @@ app.get('/api/printer/v2/test', async (req, res) => {
 //   productCode: string,
 //   productName?: string,
 //   quantity?: number,           // 1-500
-//   layout?: 'single' | 'side-by-side'
+//   layout?: 'single' | 'side-by-side',
+//   price?: number | string      // optional; formatted as VND ("1.000.000 đ") below barcode
 // }
 app.post('/api/printer/v2/print-barcode', validatePrintRequest, async (req, res) => {
   try {
-    const { productCode, productName, quantity = 1, layout = 'single' } = req.body;
+    const { productCode, productName, quantity = 1, layout = 'single', price } = req.body;
     const svc = getPrinterServiceV2();
     const result = await svc.printBarcodeLabels(
-      { productCode, productName },
+      { productCode, productName, price },
       quantity,
       { layout },
     );
@@ -434,8 +447,18 @@ process.on('uncaughtException', (error) => {
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-  logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  process.exit(1);
+  logger.error('Unhandled Rejection', {
+    reason: reason instanceof Error ? {
+      message: reason.message,
+      stack: reason.stack,
+      code: reason.code,
+      errno: reason.errno,
+      syscall: reason.syscall,
+      address: reason.address,
+      port: reason.port,
+    } : reason,
+    promise: String(promise),
+  });
 });
 
 // Start server
