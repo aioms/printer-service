@@ -173,7 +173,7 @@ class PrinterServiceV2 {
         fallback: this.fallbackConnection ? this.fallbackConnection.describe() : null,
       };
     }
-    const targets = [this.connection.describe(), this.fallbackConnection && this.fallbackConnection.describe()]
+    const targets = [this._describeConnectionIssue(this.connection), this.fallbackConnection && this._describeConnectionIssue(this.fallbackConnection)]
       .filter(Boolean)
       .join(' / ');
     const msg = `No printer connection alive (${targets})`;
@@ -261,7 +261,7 @@ class PrinterServiceV2 {
     };
     const live = await this._pickLiveConnection({ action: 'preflight', ...baseCtx });
     if (!live) {
-      const targets = [this.connection.describe(), this.fallbackConnection && this.fallbackConnection.describe()]
+      const targets = [this._describeConnectionIssue(this.connection), this.fallbackConnection && this._describeConnectionIssue(this.fallbackConnection)]
         .filter(Boolean)
         .join(' / ');
       const err = new Error(`All printer connections unreachable (${targets})`);
@@ -325,6 +325,13 @@ class PrinterServiceV2 {
       return this.driver.buildJob(item, qty);
     }
     throw new Error(`Unsupported mode: ${this.mode}`);
+  }
+
+  _describeConnectionIssue(connection) {
+    if (!connection) return null;
+    return connection.lastHealthError
+      ? `${connection.describe()} (${connection.lastHealthError})`
+      : connection.describe();
   }
 
   async _reportError(err, context) {

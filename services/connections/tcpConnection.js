@@ -49,6 +49,7 @@ class TcpConnection {
       socket.once('connect', () => finish(true));
       socket.once('timeout', () => finish(false));
       socket.once('error', () => finish(false));
+      socket.on('error', () => {}); // absorb any subsequent error events after socket is destroyed
       socket.connect(this.port, this.ipAddress);
     });
   }
@@ -82,6 +83,7 @@ class TcpConnection {
       socket.setTimeout(this.timeout);
       socket.once('timeout', () => fail(new Error(`TCP timeout after ${this.timeout}ms (${this.describe()})`)));
       socket.once('error', (err) => fail(err));
+      socket.on('error', () => {}); // absorb any subsequent error events after socket is destroyed
       socket.connect(this.port, this.ipAddress, () => {
         socket.write(buffer, (err) => {
           if (err) return fail(err);

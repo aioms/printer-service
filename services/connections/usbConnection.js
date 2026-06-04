@@ -37,6 +37,7 @@ class UsbConnection {
     this.mode = config.mode || 'spooler';
     this.timeout = config.timeout || 5000;
     this.type = `usb-${this.mode}`;
+    this.lastHealthError = null;
 
     if (this.mode === 'spooler') {
       if (!config.printerName) {
@@ -80,30 +81,37 @@ class UsbConnection {
     return new Promise((resolve) => {
       const platform = os.platform();
       if (platform === 'win32') {
-        // Use PowerShell Get-Printer. Non-zero exit = not found / offline.
-        const script =
-          "$ErrorActionPreference='Stop';" +
-          `$p = Get-Printer -Name '${this.printerName.replace(/'/g, "''")}' -ErrorAction SilentlyContinue;` +
-          "if ($null -eq $p) { exit 2 };" +
-          "if ($p.PrinterStatus -eq 'Offline' -or $p.PrinterStatus -eq 'Error') { exit 3 };" +
-          'exit 0';
+        const script = buildWindowsSpoolerHealthScript(this.printerName);
         execFile(
           'powershell.exe',
           ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
           { timeout: this.timeout },
-          (err) => resolve(!err),
+          (err) => {
+            this.lastHealthError = err ? windowsSpoolerHealthMessage(err.code) : null;
+            resolve(!err);
+          },
         );
       } else {
         // CUPS
         execFile('lpstat', ['-p', this.printerName], { timeout: this.timeout }, (err, stdout) => {
-          if (err) return resolve(false);
-          resolve(/is idle|now printing|enabled/i.test(String(stdout)));
+          if (err) {
+            this.lastHealthError = 'CUPS printer queue is unavailable';
+            return resolve(false);
+          }
+          const alive = /is idle|now printing|enabled/i.test(String(stdout));
+          this.lastHealthError = alive ? null : 'CUPS printer queue is not enabled';
+          resolve(alive);
         });
       }
     });
   }
 
   async _spoolerSend(buffer) {
+    if (!(await this._spoolerIsAlive())) {
+      const reason = this.lastHealthError ? `: ${this.lastHealthError}` : '';
+      throw new Error(`UsbConnection (spooler): printer "${this.printerName}" is not ready${reason}`);
+    }
+
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aiom-print-'));
     const tmpFile = path.join(tmpDir, `job-${Date.now()}.bin`);
     fs.writeFileSync(tmpFile, buffer);
@@ -210,6 +218,53 @@ class UsbConnection {
     } finally {
       try { device.close(); } catch (_e) { /* ignore */ }
     }
+  }
+}
+
+function buildWindowsSpoolerHealthScript(printerName) {
+  const quotedName = printerName.replace(/'/g, "''");
+  const wqlName = printerName.replace(/\\/g, '\\\\').replace(/'/g, "''");
+
+  return [
+    "$ErrorActionPreference='Stop'",
+    `$printerName='${quotedName}'`,
+    '$p = Get-Printer -Name $printerName -ErrorAction SilentlyContinue',
+    'if ($null -eq $p) { exit 2 }',
+    `$wmi = Get-CimInstance Win32_Printer -Filter "Name='${wqlName}'" -ErrorAction SilentlyContinue`,
+    'if ($null -eq $wmi) { exit 3 }',
+    'if ($wmi.WorkOffline) { exit 4 }',
+    "if ([string]$p.PrinterStatus -match 'Offline|Error') { exit 5 }",
+    "if ([string]$wmi.Status -match 'Error|Degraded') { exit 6 }",
+    'if ([int]$wmi.PrinterState -ne 0) { exit 7 }',
+    "if ($p.PortName -like 'USB*') {",
+    '  $devices = @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {',
+    '    $_.FriendlyName -eq $printerName -and',
+    "    ($_.Class -eq 'USB' -or $_.Class -eq 'Printer')",
+    '  })',
+    '  if ($devices.Count -gt 0 -and -not ($devices | Where-Object { $_.Present })) { exit 8 }',
+    '}',
+    'exit 0',
+  ].join('\n');
+}
+
+function windowsSpoolerHealthMessage(code) {
+  switch (Number(code)) {
+    case 2:
+      return 'Windows printer queue was not found';
+    case 3:
+      return 'Windows printer WMI state was not found';
+    case 4:
+      return 'Windows printer queue is set to work offline';
+    case 5:
+      return 'Windows printer status is offline or error';
+    case 6:
+      return 'Windows printer status is error or degraded';
+    case 7:
+      return 'Windows printer state is not ready';
+    case 8:
+      return 'Windows USB printer device is not present';
+    default:
+      return 'Windows printer health check failed';
   }
 }
 

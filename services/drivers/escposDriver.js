@@ -90,10 +90,16 @@ class EscposDriver {
 
   _newBuilder() {
     // Interface is never used for I/O (we call getBuffer() only), but the
-    // constructor requires a valid string. tcp://127.0.0.1:0 is a safe dummy.
+    // constructor requires a valid string.
+    //
+    // Do NOT use a tcp://localhost dummy here: some library internals may
+    // still attempt to connect and emit ECONNREFUSED, which can surface as
+    // unhandled rejections even though this driver only needs command building.
+    // Use a printer:* placeholder instead.
     const builder = new ThermalPrinter({
       type: PrinterTypes.EPSON,
-      interface: 'tcp://127.0.0.1:9100',
+      interface: 'printer:auto',
+      driver: {},
       characterSet: CharacterSet.PC437_USA,
       removeSpecialCharacters: false,
       lineCharacter: '=',
@@ -122,14 +128,14 @@ class EscposDriver {
 
     const printer = this._newBuilder();
     // Switch code page for Vietnamese glyphs.
-    printer.raw(ESCPOS_INT_CHARSET(0));
-    printer.raw(ESCPOS_SELECT_CODEPAGE(codepage));
+    printer.add(ESCPOS_INT_CHARSET(0));
+    printer.add(ESCPOS_SELECT_CODEPAGE(codepage));
 
     for (let i = 0; i < quantity; i++) {
       printer.alignCenter();
       printer.setTypeFontB();
       if (name) {
-        printer.raw(encode(name));
+        printer.add(encode(name));
         printer.newLine();
       }
       printer.code128(productCode, { width: 'MEDIUM', height: 60, text: 2 });
@@ -163,8 +169,8 @@ class EscposDriver {
     const rows = Math.ceil(quantity / 2);
 
     const printer = this._newBuilder();
-    printer.raw(ESCPOS_INT_CHARSET(0));
-    printer.raw(ESCPOS_SELECT_CODEPAGE(codepage));
+    printer.add(ESCPOS_INT_CHARSET(0));
+    printer.add(ESCPOS_SELECT_CODEPAGE(codepage));
 
     // Render Vietnamese product name as a centred text strip, so it renders
     // identically regardless of printer code-page. Optional: only use for
@@ -185,7 +191,7 @@ class EscposDriver {
           ]);
         } else {
           printer.alignCenter();
-          printer.raw(encode(name));
+          printer.add(encode(name));
           printer.newLine();
         }
       }
