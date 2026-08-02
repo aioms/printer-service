@@ -8,6 +8,7 @@ const bodyParser = require('body-parser');
 const logger = require('./config/logger');
 const PrinterService = require('./services/printerService');
 const PrinterServiceV2 = require('./services/printerServiceV2');
+const printerDiscoveryService = require('./services/printerDiscoveryService');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -394,6 +395,21 @@ app.post('/api/printer/v2/print-barcode', validatePrintRequest, async (req, res)
     res.status(statusCode).json(result);
   } catch (error) {
     logger.error('V2 print failed:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Discover printers on the local network (V2)
+app.get('/api/printer/v2/discover', async (req, res) => {
+  try {
+    const printers = await printerDiscoveryService.discover();
+    res.json({
+      success: true,
+      data: printers,
+      message: `Found ${printers.length} printer(s)`,
+    });
+  } catch (error) {
+    logger.error('Printer discovery failed:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 });
